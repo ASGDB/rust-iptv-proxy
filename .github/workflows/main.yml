@@ -25,10 +25,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install upx and opkg-utils
+      # 安装 upx 和 opkg-utils（含 opkg-build）
+      - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y upx opkg-utils
 
-      - name: Build
+      - name: Build binary
         run: |
           rustup toolchain add nightly
           rustup +nightly component add rust-src
@@ -51,11 +52,9 @@ jobs:
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           if [ -z "$VERSION" ]; then VERSION="0.0.0"; fi
 
-          # 创建 ipk 包结构
           mkdir -p ipk_pkg/usr/bin
           cp target/${{ matrix.target }}/release/iptv ipk_pkg/usr/bin/iptv-proxy
 
-          # 创建 control 文件
           mkdir -p ipk_pkg/CONTROL
           cat > ipk_pkg/CONTROL/control << EOF
           Package: iptv-proxy
@@ -67,10 +66,10 @@ jobs:
 
           # 使用 opkg-build 打包
           opkg-build ipk_pkg .
-          # 重命名为标准化名称
+          # 重命名
           mv iptv-proxy_*.ipk iptv-proxy_${{ matrix.ipk_arch }}.ipk
 
-      - name: Upload binary (ELF)
+      - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}

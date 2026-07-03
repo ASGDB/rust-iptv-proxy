@@ -49,7 +49,7 @@ jobs:
           cargo +nightly build -Zbuild-std=std,panic_abort -r --target ${{ matrix.target }}
           upx -9 target/${{ matrix.target }}/release/iptv
 
-      - name: Package as .ipk (using ar)
+      - name: Package as .ipk using SDK's opkg-build
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           if [ -z "$VERSION" ]; then VERSION="0.0.0"; fi
@@ -66,11 +66,34 @@ jobs:
           Description: IPTV proxy with JSON channel list support
           EOF
 
-          (cd ipk_pkg/CONTROL && tar -czf ../../control.tar.gz .)
-          (cd ipk_pkg/usr && tar -czf ../../data.tar.gz .)
-          echo "2.0" > debian-binary
-          ar cr iptv-proxy_${{ matrix.ipk_arch }}.ipk debian-binary control.tar.gz data.tar.gz
-          rm -rf ipk_pkg debian-binary control.tar.gz data.tar.gz
+          # 使用 SDK 中的 opkg-build
+          export PATH="$HOME/openwrt/staging_dir/host/bin:$PATH"
+          if [ -f "$HOME/openwrt/scripts/opkg-build" ]; then
+            OPKG_BUILD="$HOME/openwrt/scripts/opkg-build"
+          else
+            OPKG_BUILD=$(find "$HOME/openwrt" -name opkg-build -type f | head -1)
+          fi
+          if [ -z "$OPKG_BUILD" ]; then
+            echo "ERROR: opkg-build not found in SDK"
+            exit 1
+          fi
+          echo "Using opkg-build: $OPKG_BUILD"
+          bash "$OPKG_BUILD" -v ipk_pkg .
+          mv *.ipk iptv-proxy_${{ matrix.ipk_arch }}.ipk
+
+          # 验证 IPK
+          echo "Validating IPK:"
+          ar t iptv-proxy_${{ matrix.ipk_arch }}.ipk
+          if [ $? -ne 0 ]; then
+            echo "ERROR: Invalid IPK archive"
+            exit 1
+          fi
+          tar -tzf <(ar p iptv-proxy_${{ matrix.ipk_arch }}.ipk control.tar.gz) | grep -q './control'
+          if [ $? -ne 0 ]; then
+            echo "ERROR: control.tar.gz does not contain ./control"
+            exit 1
+          fi
+          echo "IPK validation passed."
 
       - name: Upload binary (Artifact)
         uses: actions/upload-artifact@v4
@@ -84,7 +107,6 @@ jobs:
           name: iptv-proxy_${{ matrix.ipk_arch }}.ipk
           path: iptv-proxy_${{ matrix.ipk_arch }}.ipk
 
-      # 上传到版本 Release（仅当标签推送时）
       - name: Upload to Release (tag)
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
@@ -99,7 +121,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 上传到 nightly Release（仅当 master 分支推送时）
       - name: Upload to nightly Release
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/master' && github.event_name == 'push'
@@ -112,7 +133,7 @@ jobs:
             iptv-proxy_${{ matrix.ipk_arch }}.ipk
           overwrite: true
           draft: false
-          prerelease: true   # 标记为预发布
+          prerelease: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

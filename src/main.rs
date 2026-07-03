@@ -65,7 +65,7 @@ fn to_xmltv(channels: Vec<Channel>, extra: Vec<EventReader<Cursor<String>>>) -> 
         writer.write(XmlWriteEvent::end_element())?;
         writer.write(XmlWriteEvent::end_element())?;
     }
-    // For each extra xml reader, iterate its events and copy allowed tags
+    // 处理 extra xmltv
     for reader in extra {
         for e in reader {
             match e {
@@ -162,7 +162,7 @@ async fn xmltv(args: Data<Args>, req: HttpRequest) -> impl Responder {
     debug!("Get EPG");
     let scheme = req.connection_info().scheme().to_owned();
     let host = req.connection_info().host().to_owned();
-    // parse all extra xmltv URLs in parallel using JoinSet, collect successful readers
+    // parse all extra xmltv URLs in parallel
     let extra_readers = if !args.extra_xmltv.is_empty() {
         let mut set = JoinSet::new();
         for (i, u) in args.extra_xmltv.iter().enumerate() {
@@ -207,7 +207,7 @@ async fn parse_extra_playlist(url: &str) -> Result<String> {
     if response.starts_with("#EXTM3U") {
         response
             .find('\n')
-            .map(|i| response[i..].to_owned()) // include \n
+            .map(|i| response[i..].to_owned())
             .ok_or(anyhow!("Empty playlist"))
     } else {
         Err(anyhow!("Playlist does not start with #EXTM3U"))
@@ -215,12 +215,8 @@ async fn parse_extra_playlist(url: &str) -> Result<String> {
 }
 
 #[get("/logo/{id}.png")]
-async fn logo(args: Data<Args>, path: Path<String>) -> impl Responder {
-    debug!("Get logo");
-    match get_icon(&args, &path).await {
-        Ok(icon) => HttpResponse::Ok().content_type("image/png").body(icon),
-        Err(e) => HttpResponse::NotFound().body(format!("Error getting channels: {}", e)),
-    }
+async fn logo(_args: Data<Args>, path: Path<String>) -> impl Responder {
+    HttpResponse::NotFound().body("Logo not available")
 }
 
 #[get("/playlist")]
@@ -238,6 +234,7 @@ async fn playlist(args: Data<Args>, req: HttpRequest) -> impl Responder {
     } else {
         "${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}"
     };
+
     match get_channels(&args, false, &scheme, &host).await {
         Err(e) => {
             if let Some(old_playlist) = OLD_PLAYLIST.try_lock().ok().and_then(|f| f.to_owned()) {
@@ -253,22 +250,26 @@ async fn playlist(args: Data<Args>, req: HttpRequest) -> impl Responder {
                 + &ch
                     .into_iter()
                     .map(|c| {
-                        let group = if c.name.contains("超清") {
-                            "超清频道"
-                        } else if c.name.contains("高清") {
-                            "高清频道"
+                        let group = c.group.as_deref().unwrap_or("其他");
+                        // 回看地址：如果存在 time_shift_url，则构造代理地址（用于302重定向）
+                        let catch_up = if let Some(ref url) = c.time_shift_url {
+                            // 将原始 rtsp:// 替换为 http://代理/rtsp/
+                            let proxy_url = url.replacen("rtsp://", &format!("{}://{}/rtsp/", scheme, host), 1);
+                            format!(
+                                r#" catchup="default" catchup-source="{}&playseek={}""#,
+                                proxy_url, playseek
+                            )
                         } else {
-                            "普通频道"
+                            String::new()
                         };
-                        let catch_up = c.time_shift_url.map(|url| format!(r#" catchup="default" catchup-source="{}&playseek={}" "#, url, playseek)).unwrap_or_default();
+                        let play_url = c.igmp.as_ref().unwrap_or(&c.rtsp);
                         format!(
-                            r#"#EXTINF:-1 tvg-id="{0}" tvg-name="{1}" tvg-chno="{0}"{3}tvg-logo="{4}://{5}/logo/{6}.png" group-title="{2}",{1}"#,
-                            c.id, c.name, group, catch_up, scheme, host, c.id
-                        ) + "\n" + if args.udp_proxy { c.igmp.as_ref().unwrap_or(&c.rtsp) } else { &c.rtsp }
+                            r#"#EXTINF:-1 tvg-id="{0}" tvg-name="{1}" tvg-chno="{0}"{3}tvg-logo="" group-title="{2}",{1}"#,
+                            c.id, c.name, group, catch_up
+                        ) + "\n" + play_url
                     })
                     .collect::<Vec<_>>()
                     .join("\n")
-                // parse all extra playlists in parallel and append successful ones using JoinSet
                 + &{
                     if !args.extra_playlist.is_empty() {
                         let mut set = JoinSet::new();
@@ -299,14 +300,15 @@ async fn playlist(args: Data<Args>, req: HttpRequest) -> impl Responder {
     }
 }
 
+// /rtsp 路由：302 重定向到真实 rtsp 地址
 #[get("/rtsp/{tail:.*}")]
 async fn rtsp(
-    args: Data<Args>,
+    _args: Data<Args>,
     params: Query<BTreeMap<String, String>>,
     req: HttpRequest,
 ) -> impl Responder {
     let path: String = req.match_info().query("tail").into();
-    let mut param = req.query_string().to_string();
+    let mut query = req.query_string().to_string();
     if !params.contains_key("playseek") {
         if params.contains_key("utc") {
             let start = params
@@ -319,13 +321,16 @@ async fn rtsp(
                 .map(|lutc| lutc.parse::<i64>().expect("Invalid number") * 1000)
                 .map(|lutc| to_xmltv_time(lutc).unwrap())
                 .unwrap_or(to_xmltv_time(Local::now().timestamp_millis()).unwrap());
-            param = format!("{}&playseek={}-{}", param, start, end);
+            if !query.is_empty() {
+                query.push('&');
+            }
+            query.push_str(&format!("playseek={}-{}", start, end));
         }
     }
-    HttpResponse::Ok().streaming(proxy::rtsp(
-        format!("rtsp://{}?{}", path, param),
-        args.interface.clone(),
-    ))
+    let real_url = format!("rtsp://{}?{}", path, query);
+    HttpResponse::Found()
+        .append_header((header::LOCATION, real_url))
+        .finish()
 }
 
 #[get("/udp/{addr}")]
@@ -343,17 +348,19 @@ fn usage(cmd: &str) -> std::io::Result<()> {
         r#"Usage: {} [OPTIONS] --user <USER> --passwd <PASSWD> --mac <MAC>
 
 Options:
-    -u, --user <USER>                      Login username
-    -p, --passwd <PASSWD>                  Login password
-    -m, --mac <MAC>                        MAC address
+    -u, --user <USER>                      Login username (ignored)
+    -p, --passwd <PASSWD>                  Login password (ignored)
+    -m, --mac <MAC>                        MAC address (ignored)
     -i, --imei <IMEI>                      IMEI [default: ]
     -b, --bind <BIND>                      Bind address:port [default: 0.0.0.0:7878]
     -a, --address <ADDRESS>                IP address/interface name [default: ]
     -I, --interface <INTERFACE>            Interface to request
         --extra-playlist <EXTRA_PLAYLIST>  Url to extra m3u
         --extra-xmltv <EXTRA_XMLTV>        Url to extra xmltv
-        --udp-proxy                        Use UDP proxy
-        --rtsp-proxy                       Use rtsp proxy
+        --udp-proxy                        Use UDP proxy (not recommended)
+        --rtsp-proxy                       Use rtsp proxy (deprecated, now redirects)
+        --channel-list-path <PATH>         Local path to channel_list.json [default: channel_list.json]
+        --channel-list-url <URL>           HTTP URL to channel_list.json (takes precedence over path)
     -h, --help                             Print help
 "#,
         cmd
@@ -362,7 +369,7 @@ Options:
     exit(0);
 }
 
-#[actix_web::main] // or #[tokio::main]
+#[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init();
     let args = std::env::args().collect::<Vec<_>>();

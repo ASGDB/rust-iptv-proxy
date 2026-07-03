@@ -84,7 +84,8 @@ jobs:
           name: iptv-proxy_${{ matrix.ipk_arch }}.ipk
           path: iptv-proxy_${{ matrix.ipk_arch }}.ipk
 
-      - name: Upload to Release
+      # 上传到版本 Release（仅当标签推送时）
+      - name: Upload to Release (tag)
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
@@ -95,6 +96,23 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 上传到 nightly Release（仅当 master 分支推送时）
+      - name: Upload to nightly Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+        with:
+          tag_name: nightly
+          name: Nightly Build
+          body: "Latest development build from master branch"
+          files: |
+            target/${{ matrix.target }}/release/iptv
+            iptv-proxy_${{ matrix.ipk_arch }}.ipk
+          overwrite: true
+          draft: false
+          prerelease: true   # 标记为预发布
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

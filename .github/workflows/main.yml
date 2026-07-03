@@ -1,4 +1,4 @@
-name: Build OpenWrt IPK
+name: Build
 
 on:
   workflow_dispatch:
@@ -46,14 +46,16 @@ jobs:
           cargo +nightly build -Zbuild-std=std,panic_abort -r --target ${{ matrix.target }}
           upx -9 target/${{ matrix.target }}/release/iptv
 
-      - name: Package as .ipk
+      - name: Package as .ipk (using ar)
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           if [ -z "$VERSION" ]; then VERSION="0.0.0"; fi
 
+          # 创建打包目录结构
           mkdir -p ipk_pkg/usr/bin
           cp target/${{ matrix.target }}/release/iptv ipk_pkg/usr/bin/iptv-proxy
 
+          # 创建 control 文件
           mkdir -p ipk_pkg/CONTROL
           cat > ipk_pkg/CONTROL/control << EOF
           Package: iptv-proxy
@@ -63,13 +65,20 @@ jobs:
           Description: IPTV proxy with JSON channel list support
           EOF
 
-          # 下载 opkg-build 脚本（OpenWrt 官方）
-          wget -q https://raw.githubusercontent.com/openwrt/openwrt/main/scripts/opkg-build -O opkg-build
-          chmod +x opkg-build
-          ./opkg-build ipk_pkg .
-          mv iptv-proxy_*.ipk iptv-proxy_${{ matrix.ipk_arch }}.ipk
+          # 生成 control.tar.gz 和 data.tar.gz
+          tar -czf control.tar.gz -C ipk_pkg/CONTROL .
+          tar -czf data.tar.gz -C ipk_pkg/usr .
 
-      - name: Upload binary
+          # 生成 debian-binary
+          echo "2.0" > debian-binary
+
+          # 使用 ar 打包成 ipk
+          ar r iptv-proxy_${{ matrix.ipk_arch }}.ipk debian-binary control.tar.gz data.tar.gz
+
+          # 清理临时文件
+          rm -rf ipk_pkg debian-binary control.tar.gz data.tar.gz
+
+      - name: Upload binary (ELF)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}

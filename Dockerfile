@@ -1,36 +1,23 @@
-FROM alpine:latest AS builder
+# 多阶段构建，使用 musl 实现静态编译
+FROM rust:1.81-alpine AS builder
 
-# 仅在构建阶段安装下载和解压工具
-RUN apk add --no-cache curl unzip
+RUN apk add --no-cache musl-dev
 
-WORKDIR /app
+WORKDIR /usr/src/iptv-proxy
 
-ARG TARGETARCH
-ARG VERSION
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && echo "fn main() {}" > src/main.rs
+RUN cargo build --release
 
-RUN set -ex; \
-    if [ "$TARGETARCH" = "amd64" ]; then \
-        FILE_NAME="x86_64-unknown-linux-musl.zip"; \
-    elif [ "$TARGETARCH" = "arm64" ]; then \
-        FILE_NAME="aarch64-unknown-linux-musl.zip"; \
-    fi; \
-    \
-    URL="https://github.com/yujincheng08/rust-iptv-proxy/releases/download/${VERSION}/${FILE_NAME}"; \
-    \
-    curl -L -f -o "package.zip" "${URL}" && \
-    unzip "package.zip" && \
-    # 找到二进制文件并重命名/移动到固定位置，方便下一阶段拷贝
-    mv iptv /app/iptv_bin
+COPY src ./src
+RUN cargo build --release
 
+# 最终运行镜像
 FROM alpine:latest
-# 只保留程序运行必不可少的运行时库
-RUN apk add --no-cache ca-certificates libgcc libstdc++
 
-WORKDIR /app
+RUN apk add --no-cache ca-certificates
 
-COPY --from=builder --chmod=755 /app/iptv_bin ./iptv
+COPY --from=builder /usr/src/iptv-proxy/target/release/iptv /usr/local/bin/iptv-proxy
 
 EXPOSE 7878
-
-ENTRYPOINT ["./iptv", "--bind", "0.0.0.0:7878"]
-CMD ["--help"]
+CMD ["iptv-proxy"]

@@ -1,10 +1,15 @@
-name: Build Docker Image
+name: Build and Push Docker Image
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ main, master ]
+  release:
+    types: [ created ]
 
 env:
-  LATEST_TAG: "0.2.3"
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build:
@@ -16,15 +21,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        
-      - name: Get Latest Release Version
-        id: get_version
-        run: |
-          # 使用 GitHub API 获取最新 tag 名 (例如 0.2.3)
-          LATEST_TAG=$(curl -s https://api.github.com/repos/yujincheng08/rust-iptv-proxy/releases/latest | jq -r .tag_name)
-          echo "LATEST_TAG=${LATEST_TAG}" >> $GITHUB_ENV
-          echo "VERSION_TAG=${LATEST_TAG}" >> $GITHUB_OUTPUT
-          echo "检测到最新版本为: ${LATEST_TAG}"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -35,20 +31,28 @@ jobs:
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and Push
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,format=short
+
+      - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
-          # 只打包这两种架构
-          platforms: linux/amd64,linux/arm64
-          push: true
-          # 镜像 tag 同时支持 latest 和 APP_VERSION
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/rust-iptv-proxy:latest
-            ghcr.io/${{ github.repository_owner }}/rust-iptv-proxy:${{ env.LATEST_TAG }}
-          build-args: |
-            VERSION=${{ env.LATEST_TAG }}
+          platforms: linux/amd64, linux/arm64, linux/arm/v7
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

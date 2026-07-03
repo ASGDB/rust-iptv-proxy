@@ -66,10 +66,10 @@ jobs:
           Description: IPTV proxy with JSON channel list support
           EOF
 
-          tar -czf control.tar.gz -C ipk_pkg/CONTROL .
-          tar -czf data.tar.gz -C ipk_pkg/usr .
+          (cd ipk_pkg/CONTROL && tar -czf ../../control.tar.gz .)
+          (cd ipk_pkg/usr && tar -czf ../../data.tar.gz .)
           echo "2.0" > debian-binary
-          ar r iptv-proxy_${{ matrix.ipk_arch }}.ipk debian-binary control.tar.gz data.tar.gz
+          ar cr iptv-proxy_${{ matrix.ipk_arch }}.ipk debian-binary control.tar.gz data.tar.gz
           rm -rf ipk_pkg debian-binary control.tar.gz data.tar.gz
 
       - name: Upload binary (Artifact)
@@ -91,6 +91,7 @@ jobs:
           files: |
             target/${{ matrix.target }}/release/iptv
             iptv-proxy_${{ matrix.ipk_arch }}.ipk
+          overwrite: true
           draft: false
           prerelease: false
           generate_release_notes: true

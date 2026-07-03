@@ -29,7 +29,7 @@ mod args;
 use args::Args;
 
 mod iptv;
-use iptv::{get_channels, Channel};   // 移除未使用的 get_icon
+use iptv::{get_channels, Channel};
 
 mod proxy;
 
@@ -65,7 +65,6 @@ fn to_xmltv(channels: Vec<Channel>, extra: Vec<EventReader<Cursor<String>>>) -> 
         writer.write(XmlWriteEvent::end_element())?;
         writer.write(XmlWriteEvent::end_element())?;
     }
-    // 处理 extra xmltv
     for reader in extra {
         for e in reader {
             match e {
@@ -162,7 +161,6 @@ async fn xmltv(args: Data<Args>, req: HttpRequest) -> impl Responder {
     debug!("Get EPG");
     let scheme = req.connection_info().scheme().to_owned();
     let host = req.connection_info().host().to_owned();
-    // parse all extra xmltv URLs in parallel
     let extra_readers = if !args.extra_xmltv.is_empty() {
         let mut set = JoinSet::new();
         for (i, u) in args.extra_xmltv.iter().enumerate() {
@@ -215,7 +213,7 @@ async fn parse_extra_playlist(url: &str) -> Result<String> {
 }
 
 #[get("/logo/{id}.png")]
-async fn logo(_args: Data<Args>, _path: Path<String>) -> impl Responder {   // 改为 _path
+async fn logo(_args: Data<Args>, _path: Path<String>) -> impl Responder {
     HttpResponse::NotFound().body("Logo not available")
 }
 
@@ -251,9 +249,7 @@ async fn playlist(args: Data<Args>, req: HttpRequest) -> impl Responder {
                     .into_iter()
                     .map(|c| {
                         let group = c.group.as_deref().unwrap_or("其他");
-                        // 回看地址：如果存在 time_shift_url，则构造代理地址（用于302重定向）
                         let catch_up = if let Some(ref url) = c.time_shift_url {
-                            // 将原始 rtsp:// 替换为 http://代理/rtsp/
                             let proxy_url = url.replacen("rtsp://", &format!("{}://{}/rtsp/", scheme, host), 1);
                             format!(
                                 r#" catchup="default" catchup-source="{}&playseek={}""#,
@@ -300,7 +296,6 @@ async fn playlist(args: Data<Args>, req: HttpRequest) -> impl Responder {
     }
 }
 
-// /rtsp 路由：302 重定向到真实 rtsp 地址
 #[get("/rtsp/{tail:.*}")]
 async fn rtsp(
     _args: Data<Args>,

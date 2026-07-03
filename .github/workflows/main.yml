@@ -25,9 +25,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 安装 upx 和 opkg-utils（含 opkg-build）
-      - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y upx opkg-utils
+      - name: Install upx
+        run: sudo apt-get update && sudo apt-get install -y upx
 
       - name: Build binary
         run: |
@@ -64,9 +63,10 @@ jobs:
           Description: IPTV proxy with JSON channel list support
           EOF
 
-          # 使用 opkg-build 打包
-          opkg-build ipk_pkg .
-          # 重命名
+          # 下载 opkg-build 脚本（OpenWrt 官方）
+          wget -q https://raw.githubusercontent.com/openwrt/openwrt/main/scripts/opkg-build -O opkg-build
+          chmod +x opkg-build
+          ./opkg-build ipk_pkg .
           mv iptv-proxy_*.ipk iptv-proxy_${{ matrix.ipk_arch }}.ipk
 
       - name: Upload binary

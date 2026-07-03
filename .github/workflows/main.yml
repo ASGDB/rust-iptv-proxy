@@ -1,4 +1,4 @@
-name: Build
+name: Build ipk
 
 on:
   workflow_dispatch:
@@ -6,6 +6,9 @@ on:
     branches: [ master ]
     tags: [ v* ]
   pull_request:
+
+permissions:
+  contents: write   # 允许上传 Release 资产
 
 jobs:
   build-openwrt:
@@ -69,17 +72,27 @@ jobs:
           ar r iptv-proxy_${{ matrix.ipk_arch }}.ipk debian-binary control.tar.gz data.tar.gz
           rm -rf ipk_pkg debian-binary control.tar.gz data.tar.gz
 
-      - name: Upload binary
+      - name: Upload binary (Artifact)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
           path: target/${{ matrix.target }}/release/iptv
 
-      - name: Upload IPK
+      - name: Upload IPK (Artifact)
         uses: actions/upload-artifact@v4
         with:
           name: iptv-proxy_${{ matrix.ipk_arch }}.ipk
           path: iptv-proxy_${{ matrix.ipk_arch }}.ipk
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            target/${{ matrix.target }}/release/iptv
+            iptv-proxy_${{ matrix.ipk_arch }}.ipk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-windows:
     name: Build x86_64-pc-windows-gnu

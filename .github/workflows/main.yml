@@ -8,7 +8,7 @@ on:
   pull_request:
 
 permissions:
-  contents: write   # 允许上传 Release 资产
+  contents: write
 
 jobs:
   build-openwrt:
@@ -91,6 +91,9 @@ jobs:
           files: |
             target/${{ matrix.target }}/release/iptv
             iptv-proxy_${{ matrix.ipk_arch }}.ipk
+          draft: false
+          prerelease: false
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

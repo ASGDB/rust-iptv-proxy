@@ -1,114 +1,58 @@
-name: Build
+name: Build and Push Docker Image
 
 on:
   workflow_dispatch:
   push:
-    branches: [ master ]
-    tags: [ v* ]
-  pull_request:
+    branches: [ main, master ]
+  release:
+    types: [ created ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-openwrt:
-    name: Build ${{ matrix.target }}
+  build:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-musl
-            sdk: https://downloads.openwrt.org/releases/24.10.2/targets/x86/64/openwrt-toolchain-24.10.2-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst
-            ipk_arch: x86_64
-          - target: aarch64-unknown-linux-musl
-            sdk: https://downloads.openwrt.org/releases/24.10.2/targets/armsr/armv8/openwrt-toolchain-24.10.2-armsr-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst
-            ipk_arch: aarch64_cortex-a53
+    permissions:
+      contents: read
+      packages: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 安装 upx 压缩工具
-      - name: Install upx
-        run: sudo apt-get update && sudo apt-get install -y upx
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
-      - name: Build
-        run: |
-          rustup toolchain add nightly
-          rustup +nightly component add rust-src
-          rustup +nightly target add ${{ matrix.target }} || true
-          mkdir -p ~/openwrt
-          wget "${{ matrix.sdk }}" -qO- | tar --strip-components 1 -C ~/openwrt -xv --zstd
-          toolchain="$(ls -d ~/openwrt/toolchain-*)"
-          if [ "${{ matrix.target }}" == "mipsel-unknown-linux-musl" ]; then
-            res_dir="$(ls -d ${toolchain}/lib/gcc/*/*)"
-            cp ${res_dir}/libgcc.a ${res_dir}/libunwind.a
-            export RUSTFLAGS="-Ctarget-feature=+crt-static -Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort -Clinker=$(ls ${toolchain}/bin/*-openwrt-linux-gcc) -L${toolchain}/lib -L${res_dir}"
-          else
-            export RUSTFLAGS="-Ctarget-feature=+crt-static -Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort -Clinker=$(ls ${toolchain}/bin/*-openwrt-linux-gcc)"
-          fi
-          cargo +nightly build -Zbuild-std=std,panic_abort -r --target ${{ matrix.target }}
-          upx -9 target/${{ matrix.target }}/release/iptv
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      # 打包为 .ipk
-      - name: Package as .ipk
-        run: |
-          # 安装 fpm (用于打包)
-          sudo apt-get install -y ruby ruby-dev rubygems build-essential
-          sudo gem install fpm
-
-          # 提取版本号 (从 Cargo.toml)
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-          if [ -z "$VERSION" ]; then VERSION="0.0.0"; fi
-
-          # 创建临时目录结构
-          mkdir -p ipk_pkg/usr/bin
-          cp target/${{ matrix.target }}/release/iptv ipk_pkg/usr/bin/iptv-proxy
-
-          # 生成 ipk (使用 fpm)
-          fpm -s dir -t ipk -n iptv-proxy \
-            -v "$VERSION" \
-            -a "${{ matrix.ipk_arch }}" \
-            --prefix / \
-            -C ipk_pkg \
-            --description "IPTV proxy with JSON channel list support" \
-            --url "https://github.com/${{ github.repository }}" \
-            --license "MIT" \
-            --maintainer "github@actions" \
-            -d "libc" \
-            .
-
-      - name: Upload binary (ELF)
-        uses: actions/upload-artifact@v4
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
-          name: ${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/iptv
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload IPK
-        uses: actions/upload-artifact@v4
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
         with:
-          name: iptv-proxy_${{ matrix.ipk_arch }}.ipk
-          path: iptv-proxy_*.ipk
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,format=short
 
-  build-windows:
-    name: Build x86_64-pc-windows-gnu
-    runs-on: windows-latest
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-    - name: Setup MSYS2
-      uses: msys2/setup-msys2@v2
-      with:
-        msystem: UCRT64
-        pacboy: upx:p
-    - name: Build
-      env:
-        RUSTFLAGS: -Ctarget-feature=-crt-static -Zunstable-options -Cpanic=immediate-abort -Zlocation-detail=none
-      run: |
-        rustup set default-host x86_64-pc-windows-gnu
-        rustup toolchain add nightly-gnu
-        rustup +nightly component add rust-src
-        cargo +nightly build -Z build-std=std,panic_abort -r --target x86_64-pc-windows-gnu
-        msys2 -c 'upx -9 ./target/x86_64-pc-windows-gnu/release/iptv.exe'
-    - name: Upload
-      uses: actions/upload-artifact@v4
-      with:
-        name: x86_64-pc-windows-gnu
-        path: target/x86_64-pc-windows-gnu/release/iptv.exe
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64, linux/arm64, linux/arm/v7
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

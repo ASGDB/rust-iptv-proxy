@@ -17,13 +17,17 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             sdk: https://downloads.openwrt.org/releases/24.10.2/targets/x86/64/openwrt-toolchain-24.10.2-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+            ipk_arch: x86_64
           - target: aarch64-unknown-linux-musl
             sdk: https://downloads.openwrt.org/releases/24.10.2/targets/armsr/armv8/openwrt-toolchain-24.10.2-armsr-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst
-          - target: mipsel-unknown-linux-musl
-            sdk: https://downloads.openwrt.org/releases/24.10.2/targets/ramips/mt7621/openwrt-toolchain-24.10.2-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+            ipk_arch: aarch64_cortex-a53
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install upx and opkg-utils
+        run: sudo apt-get update && sudo apt-get install -y upx opkg-utils
+
       - name: Build
         run: |
           rustup toolchain add nightly
@@ -41,11 +45,43 @@ jobs:
           fi
           cargo +nightly build -Zbuild-std=std,panic_abort -r --target ${{ matrix.target }}
           upx -9 target/${{ matrix.target }}/release/iptv
-      - name: Upload
+
+      - name: Package as .ipk
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          if [ -z "$VERSION" ]; then VERSION="0.0.0"; fi
+
+          # 创建 ipk 包结构
+          mkdir -p ipk_pkg/usr/bin
+          cp target/${{ matrix.target }}/release/iptv ipk_pkg/usr/bin/iptv-proxy
+
+          # 创建 control 文件
+          mkdir -p ipk_pkg/CONTROL
+          cat > ipk_pkg/CONTROL/control << EOF
+          Package: iptv-proxy
+          Version: $VERSION
+          Architecture: ${{ matrix.ipk_arch }}
+          Maintainer: github@actions
+          Description: IPTV proxy with JSON channel list support
+          EOF
+
+          # 使用 opkg-build 打包
+          opkg-build ipk_pkg .
+          # 重命名为标准化名称
+          mv iptv-proxy_*.ipk iptv-proxy_${{ matrix.ipk_arch }}.ipk
+
+      - name: Upload binary (ELF)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
           path: target/${{ matrix.target }}/release/iptv
+
+      - name: Upload IPK
+        uses: actions/upload-artifact@v4
+        with:
+          name: iptv-proxy_${{ matrix.ipk_arch }}.ipk
+          path: iptv-proxy_${{ matrix.ipk_arch }}.ipk
+
   build-windows:
     name: Build x86_64-pc-windows-gnu
     runs-on: windows-latest

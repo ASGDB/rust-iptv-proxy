@@ -49,7 +49,7 @@ jobs:
           cargo +nightly build -Zbuild-std=std,panic_abort -r --target ${{ matrix.target }}
           upx -9 target/${{ matrix.target }}/release/iptv
 
-      - name: Package as .ipk using official opkg-build
+      - name: Package as .ipk (manual)
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           if [ -z "$VERSION" ]; then VERSION="0.0.0"; fi
@@ -66,28 +66,41 @@ jobs:
           Description: IPTV proxy with JSON channel list support
           EOF
 
-          # 下载官方的 opkg-build 脚本（不依赖 SDK）
-          wget -q https://raw.githubusercontent.com/openwrt/openwrt/main/scripts/opkg-build -O opkg-build
-          chmod +x opkg-build
+          # 生成 control.tar.gz（顶层是 ./control）
+          tar -czf control.tar.gz -C ipk_pkg/CONTROL --transform='s/^\.\///' .
 
-          # 执行打包（-v 输出详细信息）
-          ./opkg-build -v ipk_pkg .
-          if [ $? -ne 0 ]; then
-            echo "opkg-build failed"
-            exit 1
-          fi
+          # 生成 data.tar.gz（顶层是 ./usr）
+          tar -czf data.tar.gz -C ipk_pkg/usr .
 
-          # 重命名生成的 ipk（可能为 iptv-proxy_*.ipk）
-          mv iptv-proxy_*.ipk iptv-proxy_${{ matrix.ipk_arch }}.ipk
+          echo "2.0" > debian-binary
 
-          # 验证 IPK 结构（使用 ar 检查）
+          # ar 打包（严格顺序）
+          ar cr iptv-proxy_${{ matrix.ipk_arch }}.ipk debian-binary control.tar.gz data.tar.gz
+
+          # 验证
           echo "Validating IPK:"
           ar t iptv-proxy_${{ matrix.ipk_arch }}.ipk
           if [ $? -ne 0 ]; then
             echo "ERROR: Invalid IPK archive"
             exit 1
           fi
+
+          echo "Checking control.tar.gz:"
+          tar -tzf <(ar p iptv-proxy_${{ matrix.ipk_arch }}.ipk control.tar.gz)
+          if [ $? -ne 0 ]; then
+            echo "ERROR: control.tar.gz is corrupted"
+            exit 1
+          fi
+
+          echo "Checking data.tar.gz:"
+          tar -tzf <(ar p iptv-proxy_${{ matrix.ipk_arch }}.ipk data.tar.gz)
+          if [ $? -ne 0 ]; then
+            echo "ERROR: data.tar.gz is corrupted"
+            exit 1
+          fi
+
           echo "IPK validation passed."
+          rm -rf ipk_pkg debian-binary control.tar.gz data.tar.gz
 
       - name: Upload binary (Artifact)
         uses: actions/upload-artifact@v4

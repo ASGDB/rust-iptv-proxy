@@ -1,68 +1,34 @@
 use crate::args::Args;
 use anyhow::{anyhow, Result};
-use des::{
-    cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyInit},
-    TdesEde3,
-};
-#[cfg(not(any(target_os = "android", target_os = "fuchsia", target_os = "linux")))]
-use local_ip_address::list_afinet_netifas;
 use log::{debug, info};
-use rand::Rng;
-use regex_lite::Regex;
-use reqwest::Client;
 use serde::Deserialize;
-use std::{
-    collections::HashMap,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
-use tokio::task::JoinSet;
+use tokio::fs;
 
-fn get_client_with_if(#[allow(unused_variables)] if_name: Option<&str>) -> Result<Client> {
-    let timeout = Duration::new(5, 0);
-    #[allow(unused_mut)]
-    let mut client = Client::builder().timeout(timeout).cookie_store(true);
-
-    #[cfg(not(any(target_os = "android", target_os = "fuchsia", target_os = "linux")))]
-    if let Some(i) = if_name {
-        let network_interfaces = list_afinet_netifas()?;
-        for (name, ip) in network_interfaces.iter() {
-            debug!("{}: {}", name, ip);
-            if name == i {
-                client = client.local_address(ip.to_owned());
-                break;
-            }
-        }
-    }
-
-    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-    if let Some(i) = if_name {
-        client = client.interface(i);
-    }
-
-    Ok(client.build()?)
+// ---------- JSON 数据结构 ----------
+#[derive(Debug, Deserialize)]
+struct JsonChannel {
+    channel_id: String,
+    name: String,
+    user_channel_id: Option<String>,
+    multicast_url: String,      // "igmp://225.1.4.73:1102"
+    timeshift_support: bool,
+    timeshift_length: Option<i64>,
+    timeshift_url: Option<String>, // "rtsp://..."
+    channel_fcc_ip: Option<String>,
+    channel_fcc_port: Option<String>,
+    channel_fec_port: Option<String>,
+    category: Option<String>,
 }
 
-async fn get_base_url(client: &Client, args: &Args) -> Result<String> {
-    let user = args.user.as_str();
-
-    let params = [("Action", "Login"), ("return_type", "1"), ("UserID", user)];
-
-    let url = reqwest::Url::parse_with_params(
-        "http://eds.iptv.gd.cn:8082/EDS/jsp/AuthenticationURL",
-        params,
-    )?;
-
-    let response = client.get(url).send().await?.error_for_status()?;
-
-    let epgurl = reqwest::Url::parse(response.json::<AuthJson>().await?.epgurl.as_str())?;
-    let base_url = format!(
-        "{}://{}:{}",
-        epgurl.scheme(),
-        epgurl.host_str().ok_or(anyhow!("no host"))?,
-        epgurl.port_or_known_default().ok_or(anyhow!("no host"))?,
-    );
-    debug!("Got base_url {base_url}");
-    Ok(base_url)
+// ---------- 内部 Channel 结构 ----------
+pub(crate) struct Channel {
+    pub(crate) id: u64,
+    pub(crate) name: String,
+    pub(crate) rtsp: String,            // 回看地址（可能为空）
+    pub(crate) igmp: Option<String>,    // 直播地址 (rtp:// 带参数)
+    pub(crate) epg: Vec<Program>,
+    pub(crate) time_shift_url: Option<String>,
+    pub(crate) group: Option<String>,   // 分组名称
 }
 
 pub(crate) struct Program {
@@ -72,237 +38,115 @@ pub(crate) struct Program {
     pub(crate) desc: String,
 }
 
-pub(crate) struct Channel {
-    pub(crate) id: u64,
-    pub(crate) name: String,
-    pub(crate) rtsp: String,
-    pub(crate) igmp: Option<String>,
-    pub(crate) epg: Vec<Program>,
-    pub(crate) time_shift_url: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct AuthJson {
-    epgurl: String,
-}
-
-#[derive(Deserialize)]
-struct TokenJson {
-    #[serde(rename = "EncryToken")]
-    encry_token: String,
-}
-
-#[derive(Deserialize)]
-struct PlaybillList {
-    #[serde(rename = "playbillLites")]
-    list: Vec<Bill>,
-}
-
-#[derive(Deserialize)]
-struct Bill {
-    name: String,
-    #[serde(rename = "startTime")]
-    start_time: i64,
-    #[serde(rename = "endTime")]
-    end_time: i64,
-}
-
+// ---------- 核心函数 ----------
 pub(crate) async fn get_channels(
     args: &Args,
-    need_epg: bool,
+    _need_epg: bool,
     scheme: &str,
     host: &str,
 ) -> Result<Vec<Channel>> {
-    info!("Obtaining channels");
+    // 读取 JSON 内容（优先使用 URL）
+    let json_str = if let Some(url) = &args.channel_list_url {
+        info!("Loading channels from URL: {}", url);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?;
+        let response = client.get(url).send().await?;
+        if !response.status().is_success() {
+            return Err(anyhow!("HTTP error: {}", response.status()));
+        }
+        response.text().await?
+    } else {
+        info!("Loading channels from file: {}", args.channel_list_path);
+        fs::read_to_string(&args.channel_list_path).await?
+    };
 
-    let user = args.user.as_str();
-    let passwd = args.passwd.as_str();
-    let mac = args.mac.as_str();
-    let imei = args.imei.as_str();
-    let ip = args.address.as_str();
+    let json_channels: Vec<JsonChannel> = serde_json::from_str(&json_str)?;
+    info!("Loaded {} channels", json_channels.len());
 
-    let client = get_client_with_if(args.interface.as_deref())?;
+    // 计算全局 fcc
+    let global_fcc = calculate_global_fcc(&json_channels);
+    debug!("Global fcc: {:?}", global_fcc);
 
-    let base_url = get_base_url(&client, args).await?;
+    let mut channels = Vec::new();
+    for (idx, jc) in json_channels.into_iter().enumerate() {
+        // 提取组播地址（去掉 igmp://）
+        let multicast = jc.multicast_url.trim_start_matches("igmp://");
+        let mut rtp_url = format!("rtp://{}", multicast);
 
-    let params = [
-        ("response_type", "EncryToken"),
-        ("client_id", "smcphone"),
-        ("userid", user),
-    ];
-    let url = reqwest::Url::parse_with_params(
-        format!("{base_url}/EPG/oauth/v2/authorize").as_str(),
-        params,
-    )?;
-    let response = client.get(url).send().await?.error_for_status()?;
+        // ---- 添加 fcc 参数 ----
+        let fcc = if let (Some(ip), Some(port)) = (jc.channel_fcc_ip, jc.channel_fcc_port) {
+            format!("{}:{}", ip, port)
+        } else if let Some(ref g) = global_fcc {
+            g.clone()
+        } else {
+            String::new()
+        };
+        if !fcc.is_empty() {
+            rtp_url.push_str(&format!("?fcc={}&fcc-type=huawei", fcc));
+        }
 
-    let token = response.json::<TokenJson>().await?.encry_token;
-
-    debug!("Got token {token}");
-
-    let enc = ecb::Encryptor::<TdesEde3>::new_from_slice(
-        &format!("{:X}", md5::compute(passwd.as_bytes())).as_bytes()[..]
-    );
-    let enc = match enc {
-        Ok(enc) => Ok(enc),
-        Err(e) => Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            format!("Encrpy error {e}"),
-        )),
-    }?;
-    let data = format!(
-        "{}${token}${user}${imei}${ip}${mac}$$CTC",
-        rand::thread_rng().gen_range(0..10000000),
-    );
-    let auth = hex::encode_upper(enc.encrypt_padded_vec_mut::<Pkcs7>(data.as_bytes()));
-
-    debug!("Got auth {auth}");
-
-    let params = [
-        ("client_id", "smcphone"),
-        ("DeviceType", "deviceType"),
-        ("UserID", user),
-        ("DeviceVersion", "deviceVersion"),
-        ("userdomain", "2"),
-        ("datadomain", "3"),
-        ("accountType", "1"),
-        ("authinfo", auth.as_str()),
-        ("grant_type", "EncryToken"),
-    ];
-    let url =
-        reqwest::Url::parse_with_params(format!("{base_url}/EPG/oauth/v2/token").as_str(), params)?;
-    let _response = client.get(url).send().await?.error_for_status()?;
-
-    let url = reqwest::Url::parse(format!("{base_url}/EPG/jsp/getchannellistHWCTC.jsp").as_str())?;
-
-    let response = client.get(url).send().await?.error_for_status()?;
-
-    let res = response.text().await?;
-    let re = Regex::new("Authentication.CTCSetConfig\\('Channel','(.+?)'\\)")?;
-    let mut channels = re
-        .captures_iter(&res)
-        .map(|cap| cap[1].to_string())
-        .map(|s| {
-            s.split("\",")
-                .map(|s| s.split("=\"").collect::<Vec<_>>())
-                .filter_map(|s| {
-                    s.first()
-                        .map(|a| String::from(*a))
-                        .and_then(|a| s.get(1).map(|b| String::from(*b)).map(|b| (a, b)))
-                })
-                .collect::<HashMap<_, _>>()
-        })
-        .collect::<Vec<_>>();
-
-    let channels = channels
-        .iter_mut()
-        .filter_map(|m| {
-            m.get("ChannelID")
-                .and_then(|i| str::parse::<u64>(i).ok())
-                .map(|i| (i, m))
-        })
-        .filter_map(|(i, m)| m.get("ChannelName").cloned().map(|n| (i, n, m)))
-        .filter_map(|(i, n, m)| {
-            m.get("ChannelURL")
-                .and_then(|u| {
-                    let rtsp = u.split('|').find(|u| u.starts_with("rtsp"));
-                    let igmp = u.split('|').find(|u| u.starts_with("igmp"));
-                    rtsp.map(|rtsp| (rtsp, igmp))
-                })
-                .map(|(rtsp, igmp)| {
-                    (
-                        if args.rtsp_proxy {
-                            rtsp.replace("rtsp://", &format!("{}://{}/rtsp/", scheme, host))
-                        } else {
-                            rtsp.to_string()
-                        }
-                        .replace("zoneoffset=0", "zoneoffset=480"),
-                        igmp.map(|igmp| {
-                            if args.udp_proxy {
-                                igmp.replace("igmp://", &format!("{}://{}/udp/", scheme, host))
-                            } else {
-                                igmp.to_string()
-                            }
-                        }),
-                    )
-                })
-                .map(|u| (i, n, u, m))
-        })
-        .map(|(i, n, u, m)| {
-            (
-                i,
-                n,
-                u,
-                m.get("TimeShiftURL").map(|url| {
-                    if args.rtsp_proxy {
-                        url.replace("rtsp://", &format!("{}://{}/rtsp/", scheme, host))
-                    } else {
-                        url.to_string()
-                    }
-                }),
-            )
-        })
-        .map(|(i, n, (rtsp, igmp), time_shift_url)| Channel {
-            id: i,
-            name: n.to_owned(),
-            rtsp,
-            igmp,
-            epg: vec![],
-            time_shift_url,
-        })
-        .collect::<Vec<_>>();
-
-    info!("Got {} channel(s)", channels.len());
-
-    if !need_epg {
-        return Ok(channels);
-    }
-
-    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-
-    let mut tasks = JoinSet::new();
-
-    for channel in channels.into_iter() {
-        let params = [
-            ("channelId", format!("{}", channel.id)),
-            ("begin", format!("{}", now - 86400000 * 2)),
-            ("end", format!("{}", now + 86400000 * 5)),
-        ];
-        let url = reqwest::Url::parse_with_params(
-            format!("{base_url}/EPG/jsp/iptvsnmv3/en/play/ajax/_ajax_getPlaybillList.jsp").as_str(),
-            params,
-        )?;
-        let client = client.clone();
-        tasks.spawn(async move { (client.get(url).send().await, channel) });
-    }
-    let mut channels = vec![];
-    while let Some(Ok((Ok(res), mut channel))) = tasks.join_next().await {
-        if let Ok(play_bill_list) = res.json::<PlaybillList>().await {
-            for bill in play_bill_list.list.into_iter() {
-                channel.epg.push(Program {
-                    start: bill.start_time,
-                    stop: bill.end_time,
-                    title: bill.name.clone(),
-                    desc: bill.name,
-                })
+        // ---- 添加 fec 参数 ----
+        let fec_port = if let Some(p) = jc.channel_fec_port {
+            p
+        } else {
+            // 从 multicast URL 提取端口并减 1
+            multicast
+                .split(':')
+                .nth(1)
+                .and_then(|p| p.parse::<u16>().ok())
+                .map(|p| (p - 1).to_string())
+                .unwrap_or_default()
+        };
+        if !fec_port.is_empty() {
+            if rtp_url.contains('?') {
+                rtp_url.push_str(&format!("&fec={}", fec_port));
+            } else {
+                rtp_url.push_str(&format!("?fec={}", fec_port));
             }
         }
+
+        // 构建 Channel
+        let channel = Channel {
+            id: jc.channel_id.parse::<u64>().unwrap_or(idx as u64 + 1),
+            name: jc.name.clone(),
+            rtsp: jc.timeshift_url.clone().unwrap_or_default(),
+            igmp: Some(rtp_url),
+            epg: Vec::new(),
+            time_shift_url: jc.timeshift_url,
+            group: jc.category,
+        };
         channels.push(channel);
     }
 
     Ok(channels)
 }
 
-pub(crate) async fn get_icon(args: &Args, id: &str) -> Result<Vec<u8>> {
-    let client = get_client_with_if(args.interface.as_deref())?;
+/// 计算全局 fcc：取第一个有效的 fcc，并验证前 5 个是否一致（若不一致只记录警告）
+fn calculate_global_fcc(json_channels: &[JsonChannel]) -> Option<String> {
+    let mut candidates = Vec::new();
+    for c in json_channels {
+        if let (Some(ip), Some(port)) = (&c.channel_fcc_ip, &c.channel_fcc_port) {
+            candidates.push(format!("{}:{}", ip, port));
+            if candidates.len() >= 5 {
+                break;
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+    let first = &candidates[0];
+    for c in candidates.iter().skip(1) {
+        if c != first {
+            log::warn!("Inconsistent fcc addresses found: {} vs {}", first, c);
+            break;
+        }
+    }
+    Some(first.clone())
+}
 
-    let base_url = get_base_url(&client, args).await?;
-
-    let url = reqwest::Url::parse(&format!(
-        "{base_url}/EPG/jsp/iptvsnmv3/en/list/images/channelIcon/{}.png",
-        id
-    ))?;
-
-    let response = client.get(url).send().await?.error_for_status()?;
-    Ok(response.bytes().await?.to_vec())
+// 保留原 get_icon 函数（不再使用）
+pub(crate) async fn get_icon(_args: &Args, _id: &str) -> Result<Vec<u8>> {
+    Err(anyhow!("Icons not supported in this modified version"))
 }

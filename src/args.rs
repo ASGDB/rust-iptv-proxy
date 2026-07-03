@@ -35,11 +35,9 @@ pub(crate) struct Args {
     #[argh(switch)]
     pub(crate) rtsp_proxy: bool,
 
-    // 新增：本地 JSON 文件路径（默认）
     #[argh(option, default = r#"String::from("channel_list.json")"#)]
     pub(crate) channel_list_path: String,
 
-    // 新增：远程 JSON URL（若提供则优先使用）
     #[argh(option)]
     pub(crate) channel_list_url: Option<String>,
 }

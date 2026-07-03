@@ -29,7 +29,7 @@ mod args;
 use args::Args;
 
 mod iptv;
-use iptv::{get_channels, get_icon, Channel};
+use iptv::{get_channels, Channel};   // 移除未使用的 get_icon
 
 mod proxy;
 
@@ -215,7 +215,7 @@ async fn parse_extra_playlist(url: &str) -> Result<String> {
 }
 
 #[get("/logo/{id}.png")]
-async fn logo(_args: Data<Args>, path: Path<String>) -> impl Responder {
+async fn logo(_args: Data<Args>, _path: Path<String>) -> impl Responder {   // 改为 _path
     HttpResponse::NotFound().body("Logo not available")
 }
 

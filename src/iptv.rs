@@ -10,10 +10,10 @@ struct JsonChannel {
     channel_id: String,
     name: String,
     user_channel_id: Option<String>,
-    multicast_url: String,      // "igmp://225.1.4.73:1102"
+    multicast_url: String,
     timeshift_support: bool,
     timeshift_length: Option<i64>,
-    timeshift_url: Option<String>, // "rtsp://..."
+    timeshift_url: Option<String>,
     channel_fcc_ip: Option<String>,
     channel_fcc_port: Option<String>,
     channel_fec_port: Option<String>,
@@ -24,11 +24,11 @@ struct JsonChannel {
 pub(crate) struct Channel {
     pub(crate) id: u64,
     pub(crate) name: String,
-    pub(crate) rtsp: String,            // 回看地址（可能为空）
-    pub(crate) igmp: Option<String>,    // 直播地址 (rtp:// 带参数)
+    pub(crate) rtsp: String,
+    pub(crate) igmp: Option<String>,
     pub(crate) epg: Vec<Program>,
     pub(crate) time_shift_url: Option<String>,
-    pub(crate) group: Option<String>,   // 分组名称
+    pub(crate) group: Option<String>,
 }
 
 pub(crate) struct Program {
@@ -45,7 +45,6 @@ pub(crate) async fn get_channels(
     scheme: &str,
     host: &str,
 ) -> Result<Vec<Channel>> {
-    // 读取 JSON 内容（优先使用 URL）
     let json_str = if let Some(url) = &args.channel_list_url {
         info!("Loading channels from URL: {}", url);
         let client = reqwest::Client::builder()
@@ -64,17 +63,14 @@ pub(crate) async fn get_channels(
     let json_channels: Vec<JsonChannel> = serde_json::from_str(&json_str)?;
     info!("Loaded {} channels", json_channels.len());
 
-    // 计算全局 fcc
     let global_fcc = calculate_global_fcc(&json_channels);
     debug!("Global fcc: {:?}", global_fcc);
 
     let mut channels = Vec::new();
     for (idx, jc) in json_channels.into_iter().enumerate() {
-        // 提取组播地址（去掉 igmp://）
         let multicast = jc.multicast_url.trim_start_matches("igmp://");
         let mut rtp_url = format!("rtp://{}", multicast);
 
-        // ---- 添加 fcc 参数 ----
         let fcc = if let (Some(ip), Some(port)) = (jc.channel_fcc_ip, jc.channel_fcc_port) {
             format!("{}:{}", ip, port)
         } else if let Some(ref g) = global_fcc {
@@ -86,11 +82,9 @@ pub(crate) async fn get_channels(
             rtp_url.push_str(&format!("?fcc={}&fcc-type=huawei", fcc));
         }
 
-        // ---- 添加 fec 参数 ----
         let fec_port = if let Some(p) = jc.channel_fec_port {
             p
         } else {
-            // 从 multicast URL 提取端口并减 1
             multicast
                 .split(':')
                 .nth(1)
@@ -106,7 +100,6 @@ pub(crate) async fn get_channels(
             }
         }
 
-        // 构建 Channel
         let channel = Channel {
             id: jc.channel_id.parse::<u64>().unwrap_or(idx as u64 + 1),
             name: jc.name.clone(),
@@ -122,7 +115,6 @@ pub(crate) async fn get_channels(
     Ok(channels)
 }
 
-/// 计算全局 fcc：取第一个有效的 fcc，并验证前 5 个是否一致（若不一致只记录警告）
 fn calculate_global_fcc(json_channels: &[JsonChannel]) -> Option<String> {
     let mut candidates = Vec::new();
     for c in json_channels {
@@ -146,7 +138,6 @@ fn calculate_global_fcc(json_channels: &[JsonChannel]) -> Option<String> {
     Some(first.clone())
 }
 
-// 保留原 get_icon 函数（不再使用）
 pub(crate) async fn get_icon(_args: &Args, _id: &str) -> Result<Vec<u8>> {
     Err(anyhow!("Icons not supported in this modified version"))
 }

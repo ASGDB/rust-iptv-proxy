@@ -1,4 +1,4 @@
-name: Build
+name: Build OpenWrt IPK
 
 on:
   workflow_dispatch:
